@@ -13,7 +13,6 @@ import ReactFlow, {
   Handle,
   Position,
   BackgroundVariant,
-  type NodeProps,
   type EdgeChange,
   applyEdgeChanges,
   applyNodeChanges,
@@ -22,6 +21,7 @@ import ReactFlow, {
   type Node,
   useUpdateNodeInternals,
   useReactFlow,
+  Panel,
 } from 'reactflow'
 import { Button } from '../button/Button'
 import 'reactflow/dist/base.css'
@@ -29,10 +29,10 @@ import {
   getNodesAndEdges,
   createGraphLayout,
   toNodeOrEdgeId,
-  type GraphNodeData,
   mergeLineageWithColumns,
   hasNoModels,
   mergeConnections,
+  getNodesBetween,
 } from './help'
 import {
   debounceAsync,
@@ -42,7 +42,6 @@ import {
   isFalse,
   isNil,
   isNotNil,
-  isTrue,
 } from '../../../utils'
 import { EnumSide, EnumSize, EnumVariant, type Side } from '~/types/enum'
 import {
@@ -74,6 +73,7 @@ import { Listbox, Popover, Transition } from '@headlessui/react'
 import { CodeEditorDefault } from '@components/editor/EditorCode'
 import { EnumFileExtensions } from '@models/file'
 import { useSQLMeshModelExtensions } from '@components/editor/hooks'
+import ModelNode from './ModelNode'
 
 const ModelColumnDisplay = memo(function ModelColumnDisplay({
   columnName,
@@ -754,7 +754,6 @@ function ModelColumnLineage({
     lineage,
     handleError,
     activeNodes,
-    getNodesBetween,
   } = useLineageFlow()
   const { setCenter } = useReactFlow()
 
@@ -782,98 +781,122 @@ function ModelColumnLineage({
 
   // TODO: this is a mess, refactor
   const toggleEdgeAndNodes = useCallback(
-    function toggleEdgeAndNodes(edges: Edge[] = [], nodes: Node[] = []): void {
+    function toggleEdgeAndNodes(
+      edges: Edge[] = [],
+      nodes: Node[] = [],
+    ): {
+      edges: Edge[]
+      nodes: Node[]
+    } {
       const hns = Object.values(nodesAndEdges.highlightedNodes ?? {}).flat()
 
       const visibility = new Map<string, boolean>()
-      const selectedEdges = Array.from(activeNodes)
+      const selectedEdges: Edge[] = []
+      const selectedEdgesIds = Array.from(activeNodes)
         .map(id =>
-          hns.map(hn =>
-            getNodesBetween(id, hn).concat(getNodesBetween(hn, id)),
-          ),
+          hns.map(hn => [
+            getNodesBetween(id, hn, lineage),
+            getNodesBetween(hn, id, lineage),
+          ]),
         )
         .flat(10)
 
-      const newEdges = edges.map(edge => {
-        if (isNil(edge.sourceHandle) && isNil(edge.targetHandle)) {
-          edge.hidden = false
-        } else {
-          edge.hidden = isFalse(
-            hasActiveEdge(edge.sourceHandle) &&
-              hasActiveEdge(edge.targetHandle),
-          )
-        }
-
-        let stroke = 'var(--color-graph-edge-main)'
-        let strokeWidth = 3
-
-        if (selectedEdges.includes(edge.id)) {
-          stroke = 'var(--color-graph-edge-selected)'
-          edge.zIndex = 100
-        } else {
-          if (isNotNil(edge.sourceHandle)) {
-            stroke = 'var(--color-graph-edge-secondary)'
+      return {
+        edges: edges.map(edge => {
+          if (isNil(edge.sourceHandle) && isNil(edge.targetHandle)) {
+            edge.hidden = false
+          } else {
+            edge.hidden = isFalse(
+              hasActiveEdge(edge.sourceHandle) &&
+                hasActiveEdge(edge.targetHandle),
+            )
           }
 
-          if (isNotNil(edge.targetHandle)) {
-            stroke = 'var(--color-graph-edge-secondary)'
+          if (
+            hasActiveEdge(edge.sourceHandle) ||
+            hasActiveEdge(edge.targetHandle) ||
+            selectedEdgesIds.includes(edge.id)
+          ) {
+            selectedEdges.push(edge)
           }
 
-          if (hns.includes(edge.source) || hns.includes(edge.target)) {
-            strokeWidth = 4
-            stroke = 'var(--color-graph-edge-direct)'
+          let stroke = 'var(--color-graph-edge-main)'
+          let strokeWidth = 3
+
+          if (selectedEdgesIds.includes(edge.id)) {
+            strokeWidth = 5
+            stroke = 'var(--color-graph-edge-selected)'
             edge.zIndex = 100
-          }
-        }
+          } else {
+            if (isNotNil(edge.sourceHandle)) {
+              stroke = 'var(--color-graph-edge-secondary)'
+            }
 
-        edge.style = {
-          ...edge.style,
-          stroke,
-          strokeWidth,
-        }
+            if (isNotNil(edge.targetHandle)) {
+              stroke = 'var(--color-graph-edge-secondary)'
+            }
 
-        const isTableSource =
-          nodesAndEdges.nodesMap[edge.source]?.data.type === 'cte'
-        const isTableTarget =
-          nodesAndEdges.nodesMap[edge.target]?.data.type === 'cte'
-
-        if (isTableSource) {
-          if (isFalse(visibility.has(edge.source))) {
-            visibility.set(edge.source, true)
+            if (hns.includes(edge.source) || hns.includes(edge.target)) {
+              strokeWidth = 5
+              stroke = 'var(--color-graph-edge-direct)'
+              edge.zIndex = 100
+            }
           }
 
-          visibility.set(
-            edge.source,
-            isFalse(visibility.has(edge.source)) ? false : edge.hidden,
-          )
-        }
-
-        if (isTableTarget) {
-          if (isFalse(visibility.has(edge.target))) {
-            visibility.set(edge.target, true)
+          edge.style = {
+            ...edge.style,
+            stroke,
+            strokeWidth,
           }
 
-          visibility.set(
-            edge.target,
-            isFalse(visibility.get(edge.target)) ? false : edge.hidden,
-          )
-        }
+          const isSourceTypeCTE =
+            nodesAndEdges.nodesMap[edge.source]?.data.type === 'cte'
+          const isTargetTypeCTE =
+            nodesAndEdges.nodesMap[edge.target]?.data.type === 'cte'
 
-        return edge
-      })
+          if (isSourceTypeCTE) {
+            if (isFalse(visibility.has(edge.source))) {
+              visibility.set(edge.source, true)
+            }
 
-      setEdges(newEdges)
-      setNodes(() =>
-        nodes.map(node => {
-          if (node.data.type === 'cte') {
+            visibility.set(
+              edge.source,
+              isFalse(visibility.has(edge.source)) ? false : edge.hidden,
+            )
+          }
+
+          if (isTargetTypeCTE) {
+            if (isFalse(visibility.has(edge.target))) {
+              visibility.set(edge.target, true)
+            }
+
+            visibility.set(
+              edge.target,
+              isFalse(visibility.get(edge.target)) ? false : edge.hidden,
+            )
+          }
+
+          return edge
+        }),
+        nodes: nodes.map(node => {
+          const data = {
+            ...node.data,
+            active: selectedEdges.some(
+              edge => edge.source === node.id || edge.target === node.id,
+            ),
+          }
+
+          if (data.type === 'cte') {
             node.hidden = visibility.get(node.id)
           }
 
+          node.data = data
+
           return node
         }),
-      )
+      }
     },
-    [nodesAndEdges, activeNodes],
+    [nodesAndEdges, activeNodes, lineage],
   )
 
   useEffect(() => {
@@ -883,8 +906,11 @@ function ModelColumnLineage({
 
     void createGraphLayout(nodesAndEdges)
       .then(layout => {
-        toggleEdgeAndNodes(layout.edges, layout.nodes)
+        const { edges, nodes } = toggleEdgeAndNodes(layout.edges, layout.nodes)
+
         setIsEmpty(isArrayEmpty(layout.nodes))
+        setEdges(edges)
+        setNodes(nodes)
       })
       .catch(error => {
         handleError?.(error)
@@ -896,15 +922,21 @@ function ModelColumnLineage({
 
         if (isNotNil(node)) {
           setCenter(node.position.x, node.position.y, {
-            zoom: 1,
+            zoom: 0.5,
             duration: 1000,
           })
         }
       })
-  }, [toggleEdgeAndNodes])
+  }, [nodesAndEdges])
 
   useEffect(() => {
-    toggleEdgeAndNodes(edges, nodes)
+    const { edges: newEdges, nodes: newNodes } = toggleEdgeAndNodes(
+      edges,
+      nodes,
+    )
+
+    setEdges(newEdges)
+    setNodes(newNodes)
   }, [hasActiveEdge, toggleEdgeAndNodes])
 
   function onNodesChange(changes: NodeChange[]): void {
@@ -933,20 +965,7 @@ function ModelColumnLineage({
               </Loading>
             </div>
           )}
-          <div className="flex justify-end">
-            <GraphOptions
-              options={{
-                Background: setHasBackground,
-                Columns: setWithColumns,
-              }}
-              value={
-                [
-                  withColumns && 'Columns',
-                  hasBackground && 'Background',
-                ].filter(Boolean) as string[]
-              }
-            />
-          </div>
+          <div className="flex justify-end"></div>
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -959,6 +978,23 @@ function ModelColumnLineage({
             snapGrid={[16, 16]}
             snapToGrid
           >
+            <Panel
+              position="top-right"
+              className="!mx-0 !my-1"
+            >
+              <GraphOptions
+                options={{
+                  Background: setHasBackground,
+                  Columns: setWithColumns,
+                }}
+                value={
+                  [
+                    withColumns && 'Columns',
+                    hasBackground && 'Background',
+                  ].filter(Boolean) as string[]
+                }
+              />
+            </Panel>
             <Controls className="bg-light p-1 rounded-md !border-none !shadow-lg" />
             <Background
               variant={BackgroundVariant.Dots}
@@ -972,154 +1008,7 @@ function ModelColumnLineage({
     </div>
   )
 }
-
-function ModelNode({
-  id,
-  data,
-  sourcePosition,
-  targetPosition,
-}: NodeProps & { data: GraphNodeData }): JSX.Element {
-  const {
-    models,
-    withColumns,
-    handleClickModel,
-    lineage = {},
-    activeNodes,
-    setActiveNodes,
-  } = useLineageFlow()
-
-  const { model, columns } = useMemo(() => {
-    const model = models.get(id)
-    const columns = model?.columns ?? []
-
-    Object.keys(lineage[id]?.columns ?? {}).forEach((column: string) => {
-      const found = columns.find(({ name }) => name === column)
-
-      if (isNil(found)) {
-        columns.push({ name: column, type: 'UNKNOWN' })
-      }
-    })
-
-    columns.forEach(column => {
-      column.type = isNil(column.type)
-        ? 'UNKNOWN'
-        : column.type.startsWith('STRUCT')
-        ? 'STRUCT'
-        : column.type
-    })
-
-    return {
-      model,
-      columns,
-    }
-  }, [id, models, lineage])
-
-  const handleClick = useCallback(
-    (e: MouseEvent) => {
-      e.stopPropagation()
-
-      handleClickModel?.(id)
-    },
-    [handleClickModel, id, data.isInteractive],
-  )
-
-  const highlighted = Object.keys(data.highlightedNodes ?? {}).find(key =>
-    data.highlightedNodes[key].includes(id),
-  )
-  const highlightedNodes = Object.values(data.highlightedNodes ?? {}).flat(
-    100,
-  ) as string[]
-  const splat = data.highlightedNodes?.['*']
-  const isInteractive = isTrue(data.isInteractive) && handleClickModel != null
-  const isCTE = data.type === 'cte'
-  const isModelExternal = model?.type === 'external'
-  const isModelSeed = model?.type === 'seed'
-  const showColumns = withColumns && isArrayNotEmpty(columns)
-  const type = isCTE ? 'cte' : model?.type
-  const isHighlighted = highlightedNodes.includes(id)
-  const isFirstLevel =
-    isHighlighted ||
-    Boolean(
-      lineage[id]?.models.some(mode_name =>
-        highlightedNodes.includes(mode_name),
-      ),
-    ) ||
-    highlightedNodes.some(
-      mode_name => lineage[mode_name]?.models.includes(id),
-    ) ||
-    activeNodes.has(id) ||
-    isCTE
-
-  return (
-    <div
-      className={clsx(
-        'text-xs font-semibold rounded-lg shadow-lg relative z-1',
-        isCTE ? 'text-neutral-100' : 'text-secondary-500 dark:text-primary-100',
-        (isModelExternal || isModelSeed) && 'ring-4 ring-accent-500',
-        activeNodes.has(id) && 'ring-4 ring-success-500',
-        isNil(highlighted) ? splat : highlighted,
-        isFirstLevel ? 'opacity-100' : 'opacity-40 hover:opacity-100',
-      )}
-      style={{
-        maxWidth: isNil(data.width) ? 'auto' : `${data.width as number}px`,
-      }}
-    >
-      <ModelNodeHeaderHandles
-        id={id}
-        type={type}
-        label={data.label}
-        isSelected={activeNodes.has(id)}
-        isDraggable={true}
-        className={clsx(
-          showColumns ? 'rounded-t-md' : 'rounded-lg',
-          isCTE ? 'bg-accent-500' : 'bg-secondary-100 dark:bg-primary-900',
-        )}
-        hasLeft={targetPosition === Position.Left}
-        hasRight={sourcePosition === Position.Right}
-        handleClick={isInteractive ? handleClick : undefined}
-        handleSelect={
-          isHighlighted || isCTE
-            ? undefined
-            : (e: React.MouseEvent) => {
-                e.stopPropagation()
-
-                if (isHighlighted) return
-
-                setActiveNodes(current => {
-                  if (current.has(id)) {
-                    current.delete(id)
-                  } else {
-                    current.add(id)
-                  }
-
-                  return new Set(current)
-                })
-              }
-        }
-      />
-      {showColumns && isArrayNotEmpty(columns) && (
-        <>
-          <ModelColumns
-            className="max-h-[15rem]"
-            nodeId={id}
-            columns={columns}
-            disabled={model?.type === 'python' || data.type !== 'model'}
-            withHandles={true}
-            withSource={true}
-          />
-          <div
-            className={clsx(
-              'rounded-b-md py-1',
-              isCTE ? 'bg-accent-500' : 'bg-secondary-100 dark:bg-primary-900',
-            )}
-          ></div>
-        </>
-      )}
-    </div>
-  )
-}
-
-export { ModelColumnLineage, ModelColumns }
+export { ModelColumnLineage, ModelColumns, ModelNodeHeaderHandles }
 
 function GraphOptions({
   options,
